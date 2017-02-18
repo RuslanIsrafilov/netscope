@@ -64,9 +64,8 @@ setupSlidingWindowParameters = (params, kernels, strides, paddings,
     else
         params.pad = paddings if paddings?
 
-runConvTasks = (tasks, useKernelHW = false,
-                       useStrideHW = false,
-                       usePaddingHW = false) ->
+runConvTasksBase = (tasks, LayerType, useKernelHW,
+                    useStrideHW, usePaddingHW) ->
     makeCaffeConvParams = (filters, kernels, strides, paddings) =>
         params =  { num_output: filters }
         setupSlidingWindowParameters params, kernels, strides, paddings,
@@ -76,14 +75,17 @@ runConvTasks = (tasks, useKernelHW = false,
         convParamsStr = stringifyConvParams task[2]...,
                         useKernelHW, useStrideHW, usePaddingHW
         return "from [ #{task[0]} ] to [ #{task[1]} ] with #{convParamsStr}"
-    compareConvOutput = (task) ->
-        compareLayerOutput layers.ConvolutionLayer, makeCaffeConvParams, task
+    compareConvOutput = (task) =>
+        compareLayerOutput LayerType, makeCaffeConvParams, task
     runLayerTasks tasks, makeConvTaskName, compareConvOutput
 
+runConvTasks = (tasks, useKernelHW=false, useStrideHW=false, usePaddingHW=false) ->
+    runConvTasksBase tasks, layers.ConvolutionLayer, useKernelHW, useStrideHW, usePaddingHW
 
-runPoolTasks = (tasks, useKernelHW = false,
-                       useStrideHW = false,
-                       usePaddingHW = false) ->
+runDeconvTasks = (tasks, useKernelHW=false, useStrideHW=false, usePaddingHW=false) ->
+    runConvTasksBase tasks, layers.DeconvolutionLayer, useKernelHW, useStrideHW, usePaddingHW
+
+runPoolTasks = (tasks, useKernelHW=false, useStrideHW=false, usePaddingHW=false) ->
     makeCaffePoolParams = (kernels, strides, paddings) ->
         params = { }
         setupSlidingWindowParameters params, kernels, strides, paddings,
@@ -130,6 +132,22 @@ runConcatTasks = (tasks) ->
         return text
     runLayerTasks tasks, makeConcatTaskName, compareConcatOutput
 
+runCropTasks = (tasks) ->
+    makeCaffeCropParams = (axis) ->
+        params = { }
+        params.axis = axis if axis?
+        return { crop_param: params }
+    compareCropOutput = (task) ->
+        compareLayerOutput layers.CropLayer, makeCaffeCropParams, task
+    makeCropTaskName = (task) ->
+        [inputShapes, outputShape, axis] = task
+        return  'from ['
+        for shape in inputShapes
+            text += " [ #{shape} ]"
+        text += " ] to #{outputShape}"
+        text += " where axis = #{axis}" if axis?
+        return text
+    runLayerTasks tasks, makeCropTaskName, compareCropOutput
 
 describe 'Compute 2D Convolution output shape', ->
     # [ input shape, expecting output shape ]
@@ -170,6 +188,46 @@ describe 'Compute 2D Convolution output shape', ->
         for useStrideHW in falsetrue
             for usePaddingHW in falsetrue
                 runConvTasks tasks, useKernelHW, useStrideHW, usePaddingHW
+
+describe 'Compute 2D Deconvolution output shape', ->
+    # [ input shape, expecting output shape ]
+    # null means default parameter value
+    shapes1 = (p) -> [ [32, 96, 55, 55], [32, 3, 227, 227], p ]
+    shapes2 = (p) -> [ [32, 256, 27, 27], [32, 256, 27, 27], p ]
+    shapes3 = (p) -> [ [1, 96, 15, 15], [1, 256, 15, 15], p ]
+    # [filters, kernels, strides, paddings]
+    tasks = [
+        shapes1 [ 3,  [11, 11], [4, 4], [0, 0] ]
+        shapes1 [ 3,  [11, 11], [4, 4],   0    ]
+        shapes1 [ 3,  [11, 11], [4, 4],  null  ]
+        shapes1 [ 3,  [11, 11],    4,   [0, 0] ]
+        shapes1 [ 3,  [11, 11],    4,     0    ]
+        shapes1 [ 3,  [11, 11],    4,    null  ]
+        shapes1 [ 3,     11,    [4, 4], [0, 0] ]
+        shapes1 [ 3,     11,    [4, 4],   0    ]
+        shapes1 [ 3,     11,    [4, 4],  null  ]
+        shapes1 [ 3,     11,       4,   [0, 0] ]
+        shapes1 [ 3,     11,       4,     0    ]
+        shapes1 [ 3,     11,       4,    null  ]
+        shapes2 [ 256, [5, 5],   [1, 1], [2, 2] ]
+        shapes2 [ 256, [5, 5],   [1, 1],   2    ]
+        shapes2 [ 256, [5, 5],     1,    [2, 2] ]
+        shapes2 [ 256, [5, 5],     1,      2    ]
+        shapes2 [ 256,    5,     [1, 1], [2, 2] ]
+        shapes2 [ 256,    5,     [1, 1],   2    ]
+        shapes2 [ 256,    5,       1,    [2, 2] ]
+        shapes2 [ 256,    5,       1,      2    ]
+        shapes2 [ 256,    5,      null,  [2, 2] ]
+        shapes2 [ 256,    5,      null,    2    ]
+        shapes2 [ 256, [5, 5],    null,  [2, 2] ]
+        shapes2 [ 256, [5, 5],    null,    2    ]
+        shapes3 [ 256,  [1, 7],   [1, 1], [0, 3] ]
+    ]
+    falsetrue = [false, true]
+    for useKernelHW in falsetrue
+        for useStrideHW in falsetrue
+            for usePaddingHW in falsetrue
+                runDeconvTasks tasks, useKernelHW, useStrideHW, usePaddingHW
 
 describe 'Compute 3D Convolution output shape', ->
     # [ input shape, expecting output shape ]
@@ -231,13 +289,28 @@ describe 'Compute InnerProduct output shape', ->
     runInnerProductTasks tasks
 
 describe 'Compute Concat output shape', ->
-    # [ [ input shapes ], expecting output shape, [ axis ] ]
+    # [ [ input shapes ], expecting output shape, axis ]
     tasks = [
-        [ [[32, 54, 43, 43]], [32, 54, 43, 43] ]
-        [ [[32, 54, 43, 43], [32, 21, 43, 43]], [32, 75, 43, 43] ]
+        [ [[32, 54, 43, 43]], [32, 54, 43, 43], null ]
+        [ [[32, 54, 43, 43], [32, 21, 43, 43]], [32, 75, 43, 43], null ]
         [ [[32, 21, 43, 43], [32, 21, 43, 43]], [64, 21, 43, 43], 0 ]
         [ [[32, 54, 43, 43], [32, 21, 43, 43]], [32, 75, 43, 43], 1 ]
         [ [[32, 21, 43, 43], [32, 21, 20, 43]], [32, 21, 63, 43], 2 ]
         [ [[32, 21, 30, 30], [32, 21, 30, 25]], [32, 21, 30, 55], 3 ]
     ]
     runConcatTasks tasks
+
+describe 'Compute Crop output shape', ->
+    # [ [bottom[0] shape, bottom[1] shape], expecting output shape, axis ]
+    tasks = [
+        [ [[1, 21, 44, 44], [1, 21, 34, 34]], [1, 21, 34, 34] ]
+        [ [[1, 21, 88, 88], [1, 21, 70, 70]], [1, 21, 70, 70] ]
+        [ [[1, 21, 44, 44], [1, 21, 34, 34]], [1, 21, 34, 34], 1 ]
+        [ [[1, 21, 88, 88], [1, 21, 70, 70]], [1, 21, 70, 70], 0 ]
+        [ [[1, 21, 568, 568], [1, 3, 500, 500]], [1, 3, 500, 500] ]
+        [ [[64, 32, 15, 19], [64, 16, 15, 15]], [64, 16, 15, 15], 1 ]
+        [ [[64, 32, 20, 32], [64, 16, 15, 30]], [64, 32, 15, 30], 2 ]
+        [ [[64, 32, 20, 32], [64, 16, 15, 30]], [64, 32, 20, 30], 3 ]
+    ]
+    runCropTasks tasks
+
